@@ -21,6 +21,7 @@
 #include <ESP8266WiFi.h>
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
+#include <AsyncJson.h>
 #include "config.h"
 
 
@@ -235,18 +236,21 @@ void configurarRotas() {
 
   server.addHandler(new AsyncCallbackJsonWebHandler("/config",
     [](AsyncWebServerRequest* request, JsonVariant& json) {
-      if (json.containsKey("limiteSeco")) {
+      
+      if (!json["limiteSeco"].isNull()) {
         int novoLimite = json["limiteSeco"].as<int>();
         if (novoLimite >= 0 && novoLimite <= 1023) {
           estado.limiteSeco = novoLimite;
         }
       }
-      if (json.containsKey("tempoMaxBomba")) {
+      
+      if (!json["tempoMaxBomba"].isNull()) {
         unsigned long novoTempo = json["tempoMaxBomba"].as<unsigned long>();
         if (novoTempo >= 5000 && novoTempo <= 300000) {
           estado.tempoMaxBomba = novoTempo;
         }
       }
+      
       AsyncWebServerResponse* response = request->beginResponse(
         200, "application/json", "{\"ok\":true}"
       );
