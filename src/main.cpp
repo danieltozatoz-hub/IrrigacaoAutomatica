@@ -1,134 +1,148 @@
 #include <Arduino.h>
-#include <ESP8266WiFi.h>
-#include <ESPAsyncWebServer.h>
+#include <SoftwareSerial.h>
+#include "WiFiEsp.h"
 #include <ArduinoJson.h>
 #include "config.h"
 
-AsyncWebServer server(80);
+SoftwareSerial SerialESP(2, 3); 
+WiFiEspServer server(80);
 
 struct Estado {
-  int  valorSensor   = 0;
-  bool nivelBaixo    = false; 
+  int umidade = 0;
+  bool bombaLigada = false;
+  bool modoAuto = true;
+  int limiteSeco = 30;
   unsigned long ultimaLeitura = 0;
 } estado;
 
 void lerSensor();
-void verificarNivel();
-String atualizarDashboard(); 
-void ativarAlerta();
-void desativarAlerta();
-void configurarRotas();
-void adicionarCORS(AsyncWebServerResponse* response);
+void controlarBomba();
+String montarJson();
+void processarRequisicao(WiFiEspClient &client);
 
 void setup() {
-  pinMode(PIN_RELE,         OUTPUT);
-  pinMode(PIN_LED_VERDE,    OUTPUT);
+  Serial.begin(9600);   
+  SerialESP.begin(9600);  
+
+  pinMode(PIN_VCC_SENSOR, OUTPUT);
+  pinMode(PIN_RELE, OUTPUT);
+  pinMode(PIN_LED_VERDE, OUTPUT);
   pinMode(PIN_LED_VERMELHO, OUTPUT);
-  pinMode(PIN_BUZZER,       OUTPUT);
+  pinMode(PIN_BUZZER, OUTPUT);
 
-  desativarAlerta();
+  digitalWrite(PIN_VCC_SENSOR, LOW);
+  digitalWrite(PIN_RELE, HIGH); 
+  digitalWrite(PIN_LED_VERDE, HIGH);
+  digitalWrite(PIN_LED_VERMELHO, LOW);
 
+  WiFi.init(&SerialESP);
+  
+  if (WiFi.status() == WL_NO_SHIELD) {
+    Serial.println("ERRO: Módulo ESP-01 não encontrado!");
+    while (true); 
+  }
+
+  Serial.print("Conectando ao Wi-Fi...");
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  
   while (WiFi.status() != WL_CONNECTED) {
-    digitalWrite(PIN_LED_VERMELHO, HIGH);
-    delay(200);
-    digitalWrite(PIN_LED_VERMELHO, LOW);
-    delay(200);
+    delay(500);
+    Serial.print(".");
   }
 
-  for (int i = 0; i < 3; i++) {
-    digitalWrite(PIN_LED_VERDE, HIGH);
-    delay(200);
-    digitalWrite(PIN_LED_VERDE, LOW);
-    delay(200);
-  }
-
-  configurarRotas();
+  Serial.println("\nConectado! IP do Servidor:");
+  Serial.println(WiFi.localIP());
+  
   server.begin();
 }
 
 void loop() {
-  unsigned long agora = millis();
-
-  if (agora - estado.ultimaLeitura >= INTERVALO_LEITURA) {
-    estado.ultimaLeitura = agora;
+  if (millis() - estado.ultimaLeitura > 2000) {
+    estado.ultimaLeitura = millis();
     lerSensor();
-    verificarNivel();
+    controlarBomba();
+  }
+
+  WiFiEspClient client = server.available();
+  if (client) {
+    processarRequisicao(client);
   }
 }
 
 void lerSensor() {
-  estado.valorSensor = analogRead(PIN_SENSOR);
+  digitalWrite(PIN_VCC_SENSOR, HIGH); 
+  delay(10); 
+  
+  int valorBruto = analogRead(PIN_SENSOR);
+  
+  digitalWrite(PIN_VCC_SENSOR, LOW); 
 
-  if (estado.valorSensor > LIMITE_NIVEL) {
-    estado.nivelBaixo = true;  
+  estado.umidade = map(valorBruto, 1023, 0, 0, 100);
+  
+
+  if (estado.umidade < 0) estado.umidade = 0;
+  if (estado.umidade > 100) estado.umidade = 100;
+}
+
+void controlarBomba() {
+  if (estado.modoAuto) {
+    if (estado.umidade < estado.limiteSeco) {
+      estado.bombaLigada = true;
+    } else if (estado.umidade >= estado.limiteSeco + 10) { 
+      estado.bombaLigada = false;
+    }
+  }
+
+  if (estado.bombaLigada) {
+    digitalWrite(PIN_RELE, LOW);          
+    digitalWrite(PIN_LED_VERMELHO, HIGH); 
+    digitalWrite(PIN_LED_VERDE, LOW);     
+    // tone(PIN_BUZZER, 1000);           
   } else {
-    estado.nivelBaixo = false; 
+    digitalWrite(PIN_RELE, HIGH);        
+    digitalWrite(PIN_LED_VERMELHO, LOW);  
+    digitalWrite(PIN_LED_VERDE, HIGH);    
+    noTone(PIN_BUZZER);                  
   }
 }
 
-
-void verificarNivel() {
-  if (estado.nivelBaixo) {
-    ativarAlerta();    
-  } else {
-    desativarAlerta(); 
-  }
-}
-
-void ativarAlerta() {
-  digitalWrite(PIN_LED_VERMELHO, HIGH);
-  digitalWrite(PIN_LED_VERDE,    LOW);  
-  digitalWrite(PIN_RELE,         LOW);  
-  tone(PIN_BUZZER, 1000);               
-}
-
-void desativarAlerta() {
-  digitalWrite(PIN_LED_VERDE,    HIGH);
-  digitalWrite(PIN_LED_VERMELHO, LOW); 
-  digitalWrite(PIN_RELE,         HIGH);
-  noTone(PIN_BUZZER);                   
-}
-
-String atualizarDashboard() {
+String montarJson() {
   JsonDocument doc;
-
-  if (estado.nivelBaixo) {
-    doc["status"] = "alerta";
-    doc["nivel"]  = "baixo";
-    doc["rele"]   = true;
-  } else {
-    doc["status"] = "normal";
-    doc["nivel"]  = "adequado";
-    doc["rele"]   = false;
-  }
-
-  doc["sensor"] = estado.valorSensor;
+  doc["umidade"] = estado.umidade;
+  doc["bombaLigada"] = estado.bombaLigada;
+  doc["modoAuto"] = estado.modoAuto;
+  doc["limiteSeco"] = estado.limiteSeco;
 
   String output;
   serializeJson(doc, output);
   return output;
 }
 
-void adicionarCORS(AsyncWebServerResponse* response) {
-  response->addHeader("Access-Control-Allow-Origin",  "*");
-  response->addHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-  response->addHeader("Access-Control-Allow-Headers", "Content-Type");
-}
+void processarRequisicao(WiFiEspClient &client) {
+  
+  String req = client.readStringUntil('\r');
+  client.flush();
 
-void configurarRotas() {
-  server.on("/*", HTTP_OPTIONS, [](AsyncWebServerRequest* request) {
-    AsyncWebServerResponse* response = request->beginResponse(204);
-    adicionarCORS(response);
-    request->send(response);
-  });
+  if (req.indexOf("GET /ligar") != -1) {
+    estado.bombaLigada = true;
+    estado.modoAuto = false;
+  } else if (req.indexOf("GET /desligar") != -1) {
+    estado.bombaLigada = false;
+    estado.modoAuto = false;
+  } else if (req.indexOf("GET /auto") != -1) {
+    estado.modoAuto = true;
+  } else if (req.indexOf("GET /manual") != -1) {
+    estado.modoAuto = false;
+  }
+  
+  client.println("HTTP/1.1 200 OK");
+  client.println("Content-Type: application/json");
+  client.println("Access-Control-Allow-Origin: *");
+  client.println("Connection: close");
+  client.println(); 
+  
+  client.println(montarJson());
 
-
-  server.on("/status", HTTP_GET, [](AsyncWebServerRequest* request) {
-    AsyncWebServerResponse* response = request->beginResponse(
-      200, "application/json", atualizarDashboard()
-    );
-    adicionarCORS(response);
-    request->send(response);
-  });
+  delay(10);
+  client.stop();
 }
